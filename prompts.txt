@@ -20,7 +20,13 @@ more prompts
 *	when "Randomization", skip md5 extension files
 *	while doing MD5, check if the original file is of XYZ extension.  If it is , it means it has been renamed.  In that case do MD5 for the original filename(without XYZ extn)
 
-
+*	Save any MD file created by AI in the project folder itself.
+*	the filename should be suffixed with *_yyyyMMdd.hhmmss
+*	small correction.  Create a folder in the project folder 'Prompts' and create the MD files inside it.  Also, prefix with timestamp, instead of suffix
+*	
+*	
+*	
+*	
 ----------------------------------------------------------------------------------------
 present the above as one single prompt
 ----------------------------------------------------------------------------------------
