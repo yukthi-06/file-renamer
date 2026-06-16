@@ -390,7 +390,7 @@ public class MainActivity extends AppCompatActivity {
             statusContainer.setVisibility(View.GONE);
             
             String label = "Processing…";
-            if (actionType == ActionType.RANDOMIZE) label = "Renaming files…";
+            if (actionType == ActionType.RANDOMIZE) label = "Randomizing files…";
             else if (actionType == ActionType.REVERSE) label = "Reversing files…";
             else if (actionType == ActionType.CHECKSUM) label = "Generating checksums…";
             
@@ -398,105 +398,11 @@ public class MainActivity extends AppCompatActivity {
         });
 
         executor.execute(() -> {
-            int successCount = 0;
-            int failCount    = 0;
-            int skipCount    = 0;
+            ProcessStats stats = new ProcessStats();
 
             try {
                 for (DocumentFile directory : directories) {
-                    if (directory == null || !directory.isDirectory()) continue;
-
-                    DocumentFile[] files = directory.listFiles();
-                    if (files == null || files.length == 0) continue;
-
-                    for (DocumentFile file : files) {
-                        if (!file.isFile()) continue;
-
-                        String originalName = file.getName();
-                        if (originalName == null) {
-                            failCount++;
-                            continue;
-                        }
-
-                        if (actionType == ActionType.CHECKSUM) {
-                            // Checksum logic
-                            if (originalName.toLowerCase().endsWith(".md5")) {
-                                skipCount++;
-                                continue;
-                            }
-
-                            // Determine the base name for the MD5 file (strip .xyz if present)
-                            String baseNameForMd5 = originalName;
-                            if (originalName.endsWith(XYZ_SUFFIX)) {
-                                baseNameForMd5 = originalName.substring(0, originalName.length() - XYZ_SUFFIX.length());
-                            }
-
-                            // Check if .md5 already exists
-                            String md5FileName = baseNameForMd5 + ".md5";
-                            boolean md5Exists = false;
-                            for (DocumentFile sibling : files) {
-                                if (md5FileName.equalsIgnoreCase(sibling.getName())) {
-                                    md5Exists = true;
-                                    break;
-                                }
-                            }
-
-                            if (md5Exists) {
-                                Log.d(TAG, "MD5 already exists for: " + baseNameForMd5);
-                                skipCount++;
-                                continue;
-                            }
-
-                            // Generate MD5
-                            try {
-                                String md5 = calculateMD5(file);
-                                DocumentFile md5File = directory.createFile("*/*", md5FileName);
-                                if (md5File != null) {
-                                    try (OutputStream out = getContentResolver().openOutputStream(md5File.getUri())) {
-                                        if (out != null) {
-                                            String content = md5 + " " + baseNameForMd5;
-                                            out.write(content.getBytes());
-                                            successCount++;
-                                            Log.d(TAG, "Generated MD5 for: " + originalName);
-                                        } else {
-                                            failCount++;
-                                        }
-                                    }
-                                } else {
-                                    failCount++;
-                                }
-                            } catch (Exception e) {
-                                Log.e(TAG, "Failed to generate MD5 for " + originalName, e);
-                                failCount++;
-                            }
-
-                        } else {
-                            // Renaming logic (Randomize / Reverse)
-                            boolean isReverse = (actionType == ActionType.REVERSE);
-                            String newName;
-                            if (isReverse) {
-                                if (originalName.endsWith(XYZ_SUFFIX)) {
-                                    newName = originalName.substring(0, originalName.length() - XYZ_SUFFIX.length());
-                                } else {
-                                    skipCount++;
-                                    continue;
-                                }
-                            } else {
-                                if (originalName.endsWith(XYZ_SUFFIX) || originalName.toLowerCase().endsWith(".md5")) {
-                                    skipCount++;
-                                    continue;
-                                }
-                                newName = originalName + XYZ_SUFFIX;
-                            }
-
-                            boolean renamed = file.renameTo(newName);
-                            if (renamed) {
-                                successCount++;
-                            } else {
-                                failCount++;
-                            }
-                        }
-                    }
+                    processDirectoryRecursively(directory, actionType, stats);
                 }
 
                 // Build result message
@@ -504,10 +410,10 @@ public class MainActivity extends AppCompatActivity {
                 StatusType type;
 
                 if (actionType == ActionType.CHECKSUM) {
-                    if (failCount > 0) {
+                    if (stats.failCount > 0) {
                         message = "Some Checksum Errors";
-                        type = (successCount > 0) ? StatusType.WARNING : StatusType.ERROR;
-                    } else if (successCount > 0) {
+                        type = (stats.successCount > 0) ? StatusType.WARNING : StatusType.ERROR;
+                    } else if (stats.successCount > 0) {
                         message = "Checksum Generation Success";
                         type = StatusType.SUCCESS;
                     } else {
@@ -516,10 +422,10 @@ public class MainActivity extends AppCompatActivity {
                     }
                 } else {
                     boolean isReverse = (actionType == ActionType.REVERSE);
-                    if (failCount > 0) {
+                    if (stats.failCount > 0) {
                         message = isReverse ? "Some Reversal Error" : "Some Randomization Error";
-                        type = (successCount > 0) ? StatusType.WARNING : StatusType.ERROR;
-                    } else if (successCount > 0) {
+                        type = (stats.successCount > 0) ? StatusType.WARNING : StatusType.ERROR;
+                    } else if (stats.successCount > 0) {
                         message = isReverse ? "Reversal Success" : "Randomization Success";
                         type = StatusType.SUCCESS;
                     } else {
@@ -535,6 +441,113 @@ public class MainActivity extends AppCompatActivity {
                 postStatus("An unexpected error occurred: " + e.getMessage(), StatusType.ERROR);
             }
         });
+    }
+
+    private static class ProcessStats {
+        int successCount = 0;
+        int failCount    = 0;
+        int skipCount    = 0;
+    }
+
+    private void processDirectoryRecursively(DocumentFile directory, ActionType actionType, ProcessStats stats) {
+        if (directory == null || !directory.isDirectory()) return;
+
+        DocumentFile[] files = directory.listFiles();
+        if (files == null || files.length == 0) return;
+
+        for (DocumentFile file : files) {
+            if (file.isDirectory()) {
+                processDirectoryRecursively(file, actionType, stats);
+            } else if (file.isFile()) {
+                processFile(directory, file, files, actionType, stats);
+            }
+        }
+    }
+
+    private void processFile(DocumentFile directory, DocumentFile file, DocumentFile[] siblings, ActionType actionType, ProcessStats stats) {
+        String originalName = file.getName();
+        if (originalName == null) {
+            stats.failCount++;
+            return;
+        }
+
+        if (actionType == ActionType.CHECKSUM) {
+            // Checksum logic
+            if (originalName.toLowerCase().endsWith(".md5")) {
+                stats.skipCount++;
+                return;
+            }
+
+            // Determine the base name for the MD5 file (strip .xyz if present)
+            String baseNameForMd5 = originalName;
+            if (originalName.endsWith(XYZ_SUFFIX)) {
+                baseNameForMd5 = originalName.substring(0, originalName.length() - XYZ_SUFFIX.length());
+            }
+
+            // Check if .md5 already exists
+            String md5FileName = baseNameForMd5 + ".md5";
+            boolean md5Exists = false;
+            for (DocumentFile sibling : siblings) {
+                if (md5FileName.equalsIgnoreCase(sibling.getName())) {
+                    md5Exists = true;
+                    break;
+                }
+            }
+
+            if (md5Exists) {
+                Log.d(TAG, "MD5 already exists for: " + baseNameForMd5);
+                stats.skipCount++;
+                return;
+            }
+
+            // Generate MD5
+            try {
+                String md5 = calculateMD5(file);
+                DocumentFile md5File = directory.createFile("*/*", md5FileName);
+                if (md5File != null) {
+                    try (OutputStream out = getContentResolver().openOutputStream(md5File.getUri())) {
+                        if (out != null) {
+                            String content = md5 + " " + baseNameForMd5;
+                            out.write(content.getBytes());
+                            stats.successCount++;
+                            Log.d(TAG, "Generated MD5 for: " + originalName);
+                        } else {
+                            stats.failCount++;
+                        }
+                    }
+                } else {
+                    stats.failCount++;
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to generate MD5 for " + originalName, e);
+                stats.failCount++;
+            }
+        } else {
+            // Renaming logic (Randomize / Reverse)
+            boolean isReverse = (actionType == ActionType.REVERSE);
+            String newName;
+            if (isReverse) {
+                if (originalName.endsWith(XYZ_SUFFIX)) {
+                    newName = originalName.substring(0, originalName.length() - XYZ_SUFFIX.length());
+                } else {
+                    stats.skipCount++;
+                    return;
+                }
+            } else {
+                if (originalName.endsWith(XYZ_SUFFIX) || originalName.toLowerCase().endsWith(".md5")) {
+                    stats.skipCount++;
+                    return;
+                }
+                newName = originalName + XYZ_SUFFIX;
+            }
+
+            boolean renamed = file.renameTo(newName);
+            if (renamed) {
+                stats.successCount++;
+            } else {
+                stats.failCount++;
+            }
+        }
     }
 
     private String calculateMD5(DocumentFile file) throws Exception {
