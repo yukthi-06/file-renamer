@@ -73,6 +73,10 @@ public class MainActivity extends AppCompatActivity {
     private DrawerLayout              drawerLayout;
     private NavigationView            navigationView;
 
+    // Logger
+    private FileWriter                logWriter;
+    private boolean                   isLoggerInitialized = false;
+
     // Action types
     private enum ActionType {
         RANDOMIZE, REVERSE, CHECKSUM
@@ -121,7 +125,7 @@ public class MainActivity extends AppCompatActivity {
                                             | Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
                                     getContentResolver()
                                             .takePersistableUriPermission(treeUri, flags);
-                                    startAction(Collections.singletonList(DocumentFile.fromTreeUri(MainActivity.this, treeUri)), pendingAction);
+                                    startAction(Collections.singletonList(DocumentFile.fromTreeUri(MainActivity.this, treeUri)), pendingAction, null);
                                 }
                             }
                         }
@@ -135,6 +139,8 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        logToFile(TAG, "MainActivity.onCreate: App starting up.");
 
         // Setup Toolbar
         Toolbar toolbar = findViewById(R.id.toolbar);
@@ -188,7 +194,17 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (!executor.isShutdown()) executor.shutdown();
+        if (!executor.isShutdown()) {
+            executor.shutdown();
+        }
+        if (logWriter != null) {
+            try {
+                logToFile(TAG, "MainActivity.onDestroy: Closing logger.");
+                logWriter.close();
+            } catch (IOException e) {
+                Log.e(TAG, "Error closing log writer", e); // Use Log.e as logToFile might fail
+            }
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -200,6 +216,7 @@ public class MainActivity extends AppCompatActivity {
      * Routes through permission checks before reading the config file.
      */
     private void checkPermissionsAndReadConfig(ActionType actionType) {
+        logToFile(TAG, "Checking permissions for action: " + actionType);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             // API 30+: need "All Files Access"
             if (!Environment.isExternalStorageManager()) {
@@ -237,6 +254,9 @@ public class MainActivity extends AppCompatActivity {
 
     /** Read the config file and kick off action. */
     private void readConfigAndStart(ActionType actionType) {
+        initializeLogger();
+        logToFile(TAG, "Reading config file: " + CONFIG_FILE_PATH);
+
         File configFile = new File(CONFIG_FILE_PATH);
 
         if (!configFile.exists()) {
@@ -249,9 +269,9 @@ public class MainActivity extends AppCompatActivity {
                 try (FileWriter writer = new FileWriter(configFile)) {
                     writer.write(defaultPath);
                 }
-                Log.d(TAG, "Created default config file with path: " + defaultPath);
+                logToFile(TAG, "Created default config file with path: " + defaultPath);
             } catch (IOException e) {
-                Log.e(TAG, "Failed to create default config file", e);
+                logToFile(TAG, "Failed to create default config file: " + e.getMessage());
                 showStatus(
                         "Config file not found and could not be created automatically.\n\n"
                                 + "Please create it manually at:\n" + CONFIG_FILE_PATH,
@@ -272,12 +292,14 @@ public class MainActivity extends AppCompatActivity {
                 File targetDir = new File(line);
                 if (targetDir.exists() && targetDir.isDirectory()) {
                     targetDirs.add(DocumentFile.fromFile(targetDir));
+                    logToFile(TAG, "Found configured directory: " + line);
                 } else {
                     missingPaths.add(line);
+                    logToFile(TAG, "Configured path not found or not a directory: " + line);
                 }
             }
         } catch (IOException e) {
-            Log.e(TAG, "Failed to read config file", e);
+            logToFile(TAG, "Failed to read config file: " + e.getMessage());
             showStatus("Could not read " + CONFIG_FILE_PATH + ":\n" + e.getMessage(),
                     StatusType.ERROR);
             return;
@@ -295,7 +317,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         // All good — start action across all found folders
-        startAction(targetDirs, actionType);
+        startAction(targetDirs, actionType, missingPaths);
     }
 
     // -------------------------------------------------------------------------
@@ -303,6 +325,7 @@ public class MainActivity extends AppCompatActivity {
     // -------------------------------------------------------------------------
 
     private void onSelectFolderClicked() {
+        logToFile(TAG, "Randomize button clicked.");
         pendingAction = ActionType.RANDOMIZE;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (!Environment.isExternalStorageManager()) {
@@ -319,6 +342,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void onReverseClicked() {
+        logToFile(TAG, "Reverse button clicked.");
         pendingAction = ActionType.REVERSE;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (!Environment.isExternalStorageManager()) {
@@ -335,6 +359,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void onCheckSumClicked() {
+        logToFile(TAG, "Checksum button clicked.");
         pendingAction = ActionType.CHECKSUM;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             if (!Environment.isExternalStorageManager()) {
@@ -381,20 +406,34 @@ public class MainActivity extends AppCompatActivity {
     // -------------------------------------------------------------------------
 
     /** Process multiple directories for the specified action. */
-    private void startAction(List<DocumentFile> directories, ActionType actionType) {
+    private void startAction(List<DocumentFile> directories, ActionType actionType, List<String> missingPaths) {
         runOnUiThread(() -> {
             btnSelectFolder.setEnabled(false);
             btnReverse.setEnabled(false);
             btnCheckSum.setEnabled(false);
             progressIndicator.setVisibility(View.VISIBLE);
             statusContainer.setVisibility(View.GONE);
-            
+
             String label = "Processing…";
             if (actionType == ActionType.RANDOMIZE) label = "Randomizing files…";
             else if (actionType == ActionType.REVERSE) label = "Reversing files…";
             else if (actionType == ActionType.CHECKSUM) label = "Generating checksums…";
-            
-            showStatus(label + " in " + directories.size() + " folder(s)", StatusType.INFO);
+
+            String statusMessage = label + " in " + directories.size() + " folder(s)";
+            StatusType statusType = StatusType.INFO;
+
+            if (missingPaths != null && !missingPaths.isEmpty()) {
+                String warning = "\n\nWarning: " + missingPaths.size() + " configured folder(s) were not found. They may be on a removable SD card, which is not supported when reading from the config file.";
+                statusMessage += warning;
+                logToFile(
+                        TAG,
+                        "Folders not found from config: "
+                                + String.join(", ", missingPaths)
+                );
+                statusType = StatusType.WARNING;
+            }
+
+            showStatus(statusMessage, statusType);
         });
 
         executor.execute(() -> {
@@ -435,9 +474,10 @@ public class MainActivity extends AppCompatActivity {
                 }
 
                 postStatus(message, type);
+                logToFile(TAG, "Action " + actionType + " finished. Success: " + stats.successCount + ", Fail: " + stats.failCount + ", Skip: " + stats.skipCount);
 
             } catch (Exception e) {
-                Log.e(TAG, "Unexpected error during " + actionType, e);
+                logToFile(TAG, "Unexpected error during " + actionType + ": " + e.getMessage());
                 postStatus("An unexpected error occurred: " + e.getMessage(), StatusType.ERROR);
             }
         });
@@ -495,7 +535,7 @@ public class MainActivity extends AppCompatActivity {
             }
 
             if (md5Exists) {
-                Log.d(TAG, "MD5 already exists for: " + baseNameForMd5);
+                logToFile(TAG, "MD5 already exists for: " + baseNameForMd5);
                 stats.skipCount++;
                 return;
             }
@@ -510,7 +550,7 @@ public class MainActivity extends AppCompatActivity {
                             String content = md5 + " " + baseNameForMd5;
                             out.write(content.getBytes());
                             stats.successCount++;
-                            Log.d(TAG, "Generated MD5 for: " + originalName);
+                            logToFile(TAG, "Generated MD5 for: " + originalName);
                         } else {
                             stats.failCount++;
                         }
@@ -519,7 +559,7 @@ public class MainActivity extends AppCompatActivity {
                     stats.failCount++;
                 }
             } catch (Exception e) {
-                Log.e(TAG, "Failed to generate MD5 for " + originalName, e);
+                logToFile(TAG, "Failed to generate MD5 for " + originalName + ": " + e.getMessage());
                 stats.failCount++;
             }
         } else {
@@ -544,8 +584,10 @@ public class MainActivity extends AppCompatActivity {
             boolean renamed = file.renameTo(newName);
             if (renamed) {
                 stats.successCount++;
+                logToFile(TAG, "Renamed '" + originalName + "' to '" + newName + "'");
             } else {
                 stats.failCount++;
+                logToFile(TAG, "Failed to rename '" + originalName + "' to '" + newName + "'");
             }
         }
     }
@@ -569,6 +611,52 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Logger
+    // -------------------------------------------------------------------------
+
+    private void initializeLogger() {
+        if (isLoggerInitialized) return;
+
+        // We should have permissions at this point
+        try {
+            String logDirPath = Environment.getExternalStorageDirectory().getAbsolutePath() + "/Vypeensoft/Randomizer/log";
+            File logDir = new File(logDirPath);
+            if (!logDir.exists()) {
+                if (!logDir.mkdirs()) {
+                    Log.e(TAG, "Failed to create log directory.");
+                    return;
+                }
+            }
+
+            String timestamp = new java.text.SimpleDateFormat("yyyyMMdd.HHmmss", java.util.Locale.getDefault()).format(new java.util.Date());
+            String logFileName = "log_" + timestamp + ".txt";
+            File logFile = new File(logDir, logFileName);
+
+            logWriter = new FileWriter(logFile, true); // Append mode
+            isLoggerInitialized = true;
+            logToFile(TAG, "Logger initialized. Log file: " + logFile.getAbsolutePath());
+
+        } catch (IOException e) {
+            Log.e(TAG, "Failed to initialize file logger", e);
+        }
+    }
+
+    private void logToFile(String tag, String message) {
+        // Always log to logcat for debugging in Android Studio
+        Log.d(tag, message);
+
+        // Also log to file if writer is ready
+        if (logWriter != null) {
+            try {
+                String timestamp = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.getDefault()).format(new java.util.Date());
+                logWriter.write(timestamp + " [" + tag + "] " + message + "\n");
+                logWriter.flush();
+            } catch (IOException e) {
+                Log.e(TAG, "Failed to write to log file", e);
+            }
+        }
+    }
     // -------------------------------------------------------------------------
     // UI helpers
     // -------------------------------------------------------------------------
