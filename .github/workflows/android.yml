@@ -52,7 +52,7 @@ jobs:
       - name: Rename APK
         if: success()
         run: |
-          mv app/build/outputs/apk/debug/app-debug.apk \
+          mv app/build/outputs/apk/debug/*.apk \
              app/build/outputs/apk/debug/Randomizer-${BUILD_TIMESTAMP}.apk
           echo "Renamed APK --> Randomizer-${BUILD_TIMESTAMP}.apk"
 
